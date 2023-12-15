@@ -1,0 +1,52 @@
+---
+camera:
+    fx: 
+    fy: 
+    cx: 
+    cy: 
+    im_width: 
+    im_height: 
+    typ: pybullet
+    znear:
+    zfar:
+    fov:
+scene:
+    path_img: 
+    path_depth: 
+    path_segmentation: 
+    image_resize: 1.0
+    dataset_path:
+    parent_id:
+    object_id:
+object3d:
+    position: 
+    scale: 1.0
+    # rotation can be a quaternion, matrix 3x3 flatten or not
+    rotation: 
+    model_path: 
+    opencv2opengl: False
+losses:
+    l1_rgb_with_mask: true
+    weight_rgb: 0.7
+    l1_depth_with_mask: true
+    weight_depth: 1
+    l1_mask: true
+    weight_mask: 2
+    l1_reconstruct_depth_with_mask: true
+    weight_reconstruct: 0.0
+hyperparameters:
+    nb_iterations: 20
+    batchsize: 16
+    base_lr: 20
+    learning_rates_bound: [0.01, 100]
+    learning_rate_base: 1
+    lr_decay: 0.1
+render_images:
+    nrow: 4
+    final_width_batch: 2000
+    add_background: true
+    alpha_overlay: 0.7
+    add_countour: true
+    color_countour: [0.46, 0.73, 0]
+    flip_result: true
+    crop_around_mask: False

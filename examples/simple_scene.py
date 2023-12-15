@@ -23,7 +23,7 @@ def main(cfg: DictConfig):
     cv2.imwrite("plot.png", img_plot)
 
     # save the video of optimization animation
-    ddope.make_animation(output_file_path="simple_scene.mp4")
+    ddope.make_animation(output_file_path="simple_scene.mp4",batch_index=None)
     print("Saved animation to simple_scene.mp4")
 
 

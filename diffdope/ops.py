@@ -57,7 +57,7 @@ def _get_plugin():
 
     # Linker options.
     if os.name == "posix":
-        ldflags = ["-lcuda", "-lnvrtc"]
+        ldflags = ["-lcuda", "-L/usr/local/cuda/lib64", "-lnvrtc"]
     elif os.name == "nt":
         ldflags = ["cuda.lib", "advapi32.lib", "nvrtc.lib"]
 
@@ -78,7 +78,6 @@ def _get_plugin():
     except:
         pass
 
-    # Compile and load.
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
     torch.utils.cpp_extension.load(
         name="renderutils_plugin",

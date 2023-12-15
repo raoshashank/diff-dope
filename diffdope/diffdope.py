@@ -1,8 +1,8 @@
 import logging
-
+import os
 import matplotlib
-
-matplotlib.use("Agg")
+import pybullet as p
+#matplotlib.use("Agg")
 
 import collections
 import io
@@ -208,21 +208,14 @@ def render_texture_batch(
     depth = dd.xfm_points(gb_pos.contiguous(), mtx)
     depth = depth.reshape(shape_keep)[..., 2] * -1
 
-    # mask   , _ = dr.interpolate(torch.ones(pos_idx.shape).cuda(), rast_out, pos_idx)
     mask, _ = dr.interpolate(torch.ones(pos_idx.shape).cuda(), 
-        rast_out, pos_idx[0],rast_db=rast_out_db,diff_attrs="all")
-    mask       = dr.antialias(mask, rast_out, pos_clip_ja, pos_idx[0])
-
+        rast_out, pos_idx[0],rast_db=rast_out_db,diff_attrs="all") #
+    mask = dr.antialias(mask, rast_out, pos_clip_ja, pos_idx[0])
+    
     # compute vertex color interpolation
     if vtx_color is None:
         texc, texd = dr.interpolate(
             uv, rast_out, uv_idx[0], rast_db=rast_out_db, diff_attrs="all"
-        )
-        color = dr.texture(
-            tex,
-            texc,
-            texd,
-            filter_mode="linear",
         )
         color = dr.texture(
             tex,
@@ -237,7 +230,7 @@ def render_texture_batch(
         color = color * torch.clamp(rast_out[..., -1:], 0, 1)  # Mask out background.
     if not return_rast_out:
         rast_out = None
-    return {"rgb": color, "depth": depth, "rast_out": rast_out, 'mask':mask}
+    return {"rgb": color, "depth": depth, "rast_out": rast_out, "mask":mask}
 
 
 ##############################################################################
@@ -597,7 +590,9 @@ def l1_mask(ddope):
     - lr_diff_mask_mean: The mean of the L1-on mask loss multiplied by the weight specified in the configuration.
     """
 
+    # Create the L1-on mask from the depth
     mask = ddope.renders["mask"]
+    # Add the mask to the optimization results
     ddope.optimization_results[-1]["mask"] = mask.detach().cpu()
 
     # Compute the difference between the mask and ground truth segmentation
@@ -648,10 +643,19 @@ class Camera:
     im_width: int
     im_height: int
     znear: Optional[float] = 0.01
-    zfar: Optional[float] = 200
+    zfar: Optional[float] = 100
+    fov: Optional[float] = None
+    typ: Optional[float] = 'default'
 
     def __post_init__(self):
-        self.cam_proj = self.get_projection_matrix()
+        if self.typ == 'default':
+            self.cam_proj = self.get_projection_matrix()
+        else:
+            projection_matrix = p.computeProjectionMatrixFOV(fov = self.fov,aspect = 1.0*self.im_width/self.im_height,
+                                                nearVal = self.znear,farVal=self.zfar)
+            projection_matrix = np.asarray(projection_matrix,order='F').reshape([4,4],order='F')
+            self.cam_proj = torch.tensor(projection_matrix)
+
 
     def set_batchsize(self, batchsize):
         """
@@ -1027,9 +1031,9 @@ class Object3D(torch.nn.Module):
         self.qz = torch.nn.Parameter(torch.ones(batchsize) * rotation[2])
         self.qw = torch.nn.Parameter(torch.ones(batchsize) * rotation[3])
 
-        self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0])
-        self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1])
-        self.z = torch.nn.Parameter(torch.ones(batchsize) * position[2])
+        self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0])#.requires_grad_(False)
+        self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1])#.requires_grad_(False)
+        self.z = torch.nn.Parameter(torch.ones(batchsize) * position[2])#.requires_grad_(False)
 
         self.to(device)
         if not self.mesh is None:
@@ -1049,9 +1053,9 @@ class Object3D(torch.nn.Module):
         self.qz = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[2])
         self.qw = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[3])
 
-        self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0])
-        self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1])
-        self.z = torch.nn.Parameter(torch.ones(batchsize) * self._position[2])
+        self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0])#.requires_grad_(False)
+        self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1])#.requires_grad_(False)
+        self.z = torch.nn.Parameter(torch.ones(batchsize) * self._position[2])#.requires_grad_(False)
 
         self.to(device)
 
@@ -1095,7 +1099,6 @@ class Object3D(torch.nn.Module):
         """
         q = torch.stack([self.qx, self.qy, self.qz, self.qw], dim=0).T
         q = q / torch.norm(q, dim=1).reshape(-1, 1)
-
         # TODO add the dict from object3d to the output of the module.
         to_return = self.mesh()
         to_return["quat"] = q
@@ -1202,23 +1205,55 @@ class Scene:
     path_depth: Optional[str] = None
     path_segmentation: Optional[str] = None
     image_resize: Optional[float] = None
-
     tensor_rgb: Optional[Image] = None
     tensor_depth: Optional[Image] = None
     tensor_segmentation: Optional[Image] = None
 
+    dataset_path: Optional[str] = None
+    parent_id: Optional[int] = None
+    object_id: Optional[int] = None
+    
+
     def __post_init__(self):
         # load the images and store them correctly
-        if not self.path_img is None:
-            self.tensor_rgb = Image(self.path_img, img_resize=self.image_resize)
-        if not self.path_depth is None:
-            self.tensor_depth = Image(
-                self.path_depth, img_resize=self.image_resize, depth=True
-            )
-        if not self.path_segmentation is None:
-            self.tensor_segmentation = Image(
-                self.path_segmentation, img_resize=self.image_resize
-            )
+        if not self.dataset_path is None:
+            dfile = np.load(os.path.join(self.dataset_path,f'{self.parent_id}.npz'),allow_pickle=True)
+            fname = dfile.files[0]
+            dfile = dfile[fname].item()
+            rgb_raw = dfile['img_arr'][0][...,:3].astype(np.float32)
+            depth_raw = dfile['img_arr'][1].astype(np.float32)
+            seg_raw = dfile['img_arr'][2].astype(np.float32)
+            camera_info = dfile['camera_info']
+            znear = camera_info['nearVal']
+            zfar = camera_info['farVal']
+            
+            rgb = rgb_raw/255.0
+            rgb = np.flip(rgb,[0])
+            self.tensor_rgb = Image(img_tensor=torch.tensor(rgb.copy()).float())
+
+            depth = zfar*znear*1.0/(zfar - depth_raw*(zfar-znear))
+            depth = np.flip(depth,[0])
+            self.tensor_depth = Image(img_tensor= torch.tensor(depth.copy()).float())
+
+            seg = seg_raw * (seg_raw == self.object_id)
+            seg[seg==self.object_id] = 1.0
+            seg = np.flip(seg,[0])
+            self.tensor_segmentation = Image(img_tensor=torch.tensor(seg.copy()).unsqueeze(-1).repeat(1,1,3).float())
+            self.path_img = True            
+            self.path_depth = True
+            self.path_segmentation = True
+
+        else:
+            if not self.path_img is None:
+                self.tensor_rgb = Image(self.path_img, img_resize=self.image_resize)
+            if not self.path_depth is None:
+                self.tensor_depth = Image(
+                    self.path_depth, img_resize=self.image_resize, depth=True
+                )
+            if not self.path_segmentation is None:
+                self.tensor_segmentation = Image(
+                    self.path_segmentation, img_resize=self.image_resize
+                )
 
     def set_batchsize(self, batchsize):
         """
@@ -1544,6 +1579,7 @@ class DiffDope:
         )
 
         if batch_index == -1:
+            #this gets the batch with least loss in the last iteration (least average of all the loses)
             batch_index = self.get_argmin()
 
         # Loop through the list of images and add each frame to the video
@@ -1672,11 +1708,12 @@ class DiffDope:
             self.optimizer.zero_grad()
 
             result = self.object3d()
-
+            
             # transform quat and position into a matrix44
             mtx_gu = matrix_batch_44_from_position_quat(
                 p=result["trans"], q=result["quat"]
             )
+            print(f"Current vals: {result['quat']}")
 
             if self.object3d.mesh.has_textured_map is False:
                 self.renders = render_texture_batch(
@@ -1701,23 +1738,47 @@ class DiffDope:
                     tex=result["tex"],
                     resolution=self.resolution,
                 )
+           
             to_add = {}
             to_add["rgb"] = self.renders["rgb"].detach().cpu()
             to_add["depth"] = self.renders["depth"].detach().cpu()
             to_add["mtx"] = mtx_gu.detach().cpu()
-
             self.optimization_results.append(to_add)
 
             # computing the losses
+            losses={
+             0:'rgb',
+             1:'depth',
+             2:'mask'   
+            }
             loss = torch.zeros(1).cuda()
-            for loss_function in self.loss_functions:
+            for i,loss_function in enumerate(self.loss_functions):
                 l = loss_function(self)
                 if l is None:
                     continue
+                #print(f'{losses[i]}:{l}')
                 loss += l
+                
             pbar.set_description(f"loss: {loss.item():.4f}")
             loss.backward()
             self.optimizer.step()
+            self.optimization_results[-1]["gradients"] = np.stack([self.object3d.qx.grad.detach().cpu().numpy(),
+                                               self.object3d.qy.grad.detach().cpu().numpy(),
+                                               self.object3d.qz.grad.detach().cpu().numpy(),
+                                               self.object3d.qw.grad.detach().cpu().numpy(),
+                                            #    self.object3d.x.grad.detach().cpu().numpy(),
+                                            #    self.object3d.y.grad.detach().cpu().numpy(),
+                                            #    self.object3d.z.grad.detach().cpu().numpy()
+            ])
+            self.optimization_results[-1]["values"] = np.stack([self.object3d.qx.detach().cpu().numpy(),
+                                               self.object3d.qy.detach().cpu().numpy(),
+                                               self.object3d.qz.detach().cpu().numpy(),
+                                               self.object3d.qw.detach().cpu().numpy(),
+                                            #    self.object3d.x.detach().cpu().numpy(),
+                                            #    self.object3d.y.detach().cpu().numpy(),
+                                            #    self.object3d.z.detach().cpu().numpy()
+            ])
+            
 
     def cuda(self):
         """
