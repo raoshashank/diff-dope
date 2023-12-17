@@ -523,7 +523,6 @@ def l1_rgb_with_mask(ddope):
     """
     Computes the l1_rgb on a DiffDOPE object, simpler to pass the object.
     """
-
     diff_rgb = torch.abs(
         (ddope.renders["rgb"] - ddope.gt_tensors["rgb"])
         * ddope.gt_tensors["segmentation"]
@@ -558,16 +557,19 @@ def l1_depth_with_mask(ddope):
 
 def l1_reconstruct_depth_with_mask(ddope):
     """
-    Computes the Error in adding an image 
+    Computes the Error in adding the rendered object to the depth image
     """
-    mask = ddope.renders["rgb"] > 0
-    mask = mask.to(torch.float32)
-    reconstructed_depth_loss = torch.abs(torch.min(ddope.renders["depth"],ddope.gt_tensors["depth"])-ddope.gt_tensors["depth"])*mask[...,0]
-    
+    mask = ddope.renders['mask']
+    gt_depth = ddope.gt_tensors["depth"].clone()
+    #reconstructed_depth_loss = torch.abs(torch.min(gt_depth,
+    #                        ddope.renders["depth"])-gt_depth)*mask[...,0]
+    full_depth = torch.where(mask[...,0]>0,torch.min(ddope.renders["depth"],gt_depth),gt_depth)
+    reconstructed_depth_loss = torch.abs(full_depth-gt_depth)*mask[...,0]
+
     lr_diff_depth = dist_batch_lr(reconstructed_depth_loss, ddope.learning_rates, [1, 2])
 
     ddope.add_loss_value(
-        "depth", torch.mean(reconstructed_depth_loss.detach(), (1, 2))# * ddope.cfg.losses.weight_depth
+        "reconstructed_depth", torch.mean(reconstructed_depth_loss.detach(), (1, 2))# * ddope.cfg.losses.weight_reconstruct
     )
 
     return lr_diff_depth.mean() * ddope.cfg.losses.weight_reconstruct
@@ -958,6 +960,7 @@ class Object3D(torch.nn.Module):
         opencv2opengl: bool = True,
         model_path: str = None,
         scale: int = 1,
+        refine_translation = True
     ):
         """
         Args:
@@ -969,7 +972,7 @@ class Object3D(torch.nn.Module):
         """
         super().__init__()
         self.rx = None  # to load on cpu and not gpu
-
+        self.refine_translation = refine_translation
         if model_path is None:
             self.mesh = None    
         else:
@@ -1028,9 +1031,15 @@ class Object3D(torch.nn.Module):
         self.ry = torch.nn.Parameter(torch.ones(batchsize) * rotation[1])
         self.rz = torch.nn.Parameter(torch.ones(batchsize) * rotation[2])
         self.rotation = [self.rx,self.ry,self.rz]
-        self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0])#.requires_grad_(False)
-        self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1])#.requires_grad_(False)
-        self.z = torch.nn.Parameter(torch.ones(batchsize) * position[2])#.requires_grad_(False)
+
+        self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0]).requires_grad_(False)
+        self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1]).requires_grad_(False)
+        self.z = torch.nn.Parameter(torch.ones(batchsize) * position[2]).requires_grad_(False)
+        if self.refine_translation==False:
+            self.x.requires_grad_(False)
+            self.y.requires_grad_(False)
+            self.z.requires_grad_(False)
+            
         self.position = [self.x,self.y,self.z]
         
         self.to(device)
@@ -1050,9 +1059,14 @@ class Object3D(torch.nn.Module):
         self.ry = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[1])
         self.rz = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[2])
         
-        self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0])#.requires_grad_(False)
-        self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1])#.requires_grad_(False)
-        self.z = torch.nn.Parameter(torch.ones(batchsize) * self._position[2])#.requires_grad_(False)
+        self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0])
+        self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1])
+        self.z = torch.nn.Parameter(torch.ones(batchsize) * self._position[2])
+        
+        if self.refine_translation==False:
+            self.x.requires_grad_(False)
+            self.y.requires_grad_(False)
+            self.z.requires_grad_(False)
 
         self.to(device)
 
@@ -1345,7 +1359,6 @@ class DiffDope:
         if self.scene is None:
             self.scene = Scene(**self.cfg.scene)
         self.batchsize = self.cfg.hyperparameters.batchsize
-
         # load the rendering
         self.glctx = dr.RasterizeGLContext()
         self.cuda()
@@ -1377,7 +1390,7 @@ class DiffDope:
             self.loss_functions.append(dd.l1_mask)
         if self.cfg.losses.l1_reconstruct_depth_with_mask:
             self.loss_functions.append(dd.l1_reconstruct_depth_with_mask)
-
+        self.stage_ratio = self.cfg.losses.stage_ratio
         # self.object3d.mesh.enable_gradients_texture()
 
         # logging
@@ -1453,14 +1466,12 @@ class DiffDope:
             index = -1
         else:
             assert index < len(self.optimization_results) and index >= 0
-
-        if self.cfg.render_images.crop_around_mask:
-            if "segmentation" in self.gt_tensors.keys():
-                crop = find_crop(self.gt_tensors["segmentation"][0],percentage=0.3)
-
-            else:
-                crop = find_crop(self.optimization_results[index][render_selection][0],percentage=0.3)
         
+        if self.cfg.render_images.crop_around_mask:    
+            if "segmentation" in self.gt_tensors.keys() and len(torch.nonzero(self.gt_tensors["segmentation"][0])) != 0:
+                crop = find_crop(self.gt_tensors["segmentation"][0],percentage=0.5)
+            else:
+                crop = find_crop(self.optimization_results[index][render_selection][0],percentage=0.5)
         if batch_index is None:
             # make a grid
             if self.cfg.render_images.crop_around_mask:
@@ -1658,7 +1669,7 @@ class DiffDope:
 
         return image_rgb
 
-    def get_pose(self, batch_index=-1):
+    def get_pose(self, batch_index=-1,get_all=False):
         """
         return the matrix pose as a np.ndarray
 
@@ -1669,8 +1680,10 @@ class DiffDope:
         """
         if batch_index == -1:
             batch_index = self.get_argmin()
-
-        matrix44 = self.optimization_results[-1]["mtx"][batch_index].numpy()
+        if get_all: 
+            matrix44 = [self.optimization_results[i]["mtx"][batch_index].numpy() for i in range(len(self.optimization_results))]
+        else:
+            matrix44 = self.optimization_results[-1]["mtx"][batch_index].numpy()
 
         return matrix44
 
@@ -1756,9 +1769,9 @@ class DiffDope:
             self.optimization_results[-1]["gradients"] = np.stack([self.object3d.rx.grad.detach().cpu().numpy(),
                                                self.object3d.ry.grad.detach().cpu().numpy(),
                                                self.object3d.rz.grad.detach().cpu().numpy(),
-                                               self.object3d.x.grad.detach().cpu().numpy(),
-                                               self.object3d.y.grad.detach().cpu().numpy(),
-                                               self.object3d.z.grad.detach().cpu().numpy()
+                                               #self.object3d.x.grad.detach().cpu().numpy(),
+                                               #self.object3d.y.grad.detach().cpu().numpy(),
+                                               #self.object3d.z.grad.detach().cpu().numpy()
             ])
             self.optimization_results[-1]["values"] = np.stack([self.object3d.rx.detach().cpu().numpy(),
                                                self.object3d.ry.detach().cpu().numpy(),

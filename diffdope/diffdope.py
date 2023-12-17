@@ -1031,9 +1031,9 @@ class Object3D(torch.nn.Module):
         self.qz = torch.nn.Parameter(torch.ones(batchsize) * rotation[2])
         self.qw = torch.nn.Parameter(torch.ones(batchsize) * rotation[3])
 
-        self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0])#.requires_grad_(False)
-        self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1])#.requires_grad_(False)
-        self.z = torch.nn.Parameter(torch.ones(batchsize) * position[2])#.requires_grad_(False)
+        self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0]).requires_grad_(False)
+        self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1]).requires_grad_(False)
+        self.z = torch.nn.Parameter(torch.ones(batchsize) * position[2]).requires_grad_(False)
 
         self.to(device)
         if not self.mesh is None:
@@ -1053,9 +1053,9 @@ class Object3D(torch.nn.Module):
         self.qz = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[2])
         self.qw = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[3])
 
-        self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0])#.requires_grad_(False)
-        self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1])#.requires_grad_(False)
-        self.z = torch.nn.Parameter(torch.ones(batchsize) * self._position[2])#.requires_grad_(False)
+        self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0]).requires_grad_(False)
+        self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1]).requires_grad_(False)
+        self.z = torch.nn.Parameter(torch.ones(batchsize) * self._position[2]).requires_grad_(False)
 
         self.to(device)
 

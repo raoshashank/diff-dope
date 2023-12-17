@@ -25,6 +25,7 @@ object3d:
     rotation: 
     model_path: 
     opencv2opengl: False
+    refine_translation: True
 losses:
     l1_rgb_with_mask: true
     weight_rgb: 0.7
@@ -34,6 +35,7 @@ losses:
     weight_mask: 2
     l1_reconstruct_depth_with_mask: true
     weight_reconstruct: 0.0
+    stage_ratio:
 hyperparameters:
     nb_iterations: 20
     batchsize: 16

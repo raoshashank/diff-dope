@@ -1,4 +1,4 @@
-from .diffdope import *
+from .diffdope_rtheta import *
 from .ops import xfm_points, xfm_vectors
 
 __all__ = [
