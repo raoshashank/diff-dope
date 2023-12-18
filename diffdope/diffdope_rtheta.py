@@ -33,7 +33,7 @@ from PIL import ImageColor, ImageDraw, ImageFont
 from tqdm import tqdm
 from theseus.geometry import SO3
 import diffdope as dd
-
+from itertools import chain
 # for better print debug
 print()
 if not hasattr(sys, 'ps1'):
@@ -41,6 +41,52 @@ if not hasattr(sys, 'ps1'):
 
 # A logger for this file
 log = logging.getLogger(__name__)
+
+def matrix_batch_44_from_position_quat(q, p):
+    """
+    Convert a batched position and quaternion into a batch matrix while keeping the gradients intact.
+
+    Args:
+        p (torch.tensor): (batch,3) translation vector
+        q (torch.tensor): (batch,4) quaternion in x,y,z,w
+
+    Return:
+        returns a (batch,4,4) torch tensor that keeps the gradients intact
+    """
+    r0 = torch.stack(
+        [
+            1.0 - 2.0 * q[:, 1] ** 2 - 2.0 * q[:, 2] ** 2,
+            2.0 * q[:, 0] * q[:, 1] - 2.0 * q[:, 2] * q[:, 3],
+            2.0 * q[:, 0] * q[:, 2] + 2.0 * q[:, 1] * q[:, 3],
+        ],
+        dim=1,
+    )
+    r1 = torch.stack(
+        [
+            2.0 * q[:, 0] * q[:, 1] + 2.0 * q[:, 2] * q[:, 3],
+            1.0 - 2.0 * q[:, 0] ** 2 - 2.0 * q[:, 2] ** 2,
+            2.0 * q[:, 1] * q[:, 2] - 2.0 * q[:, 0] * q[:, 3],
+        ],
+        dim=1,
+    )
+    r2 = torch.stack(
+        [
+            2.0 * q[:, 0] * q[:, 2] - 2.0 * q[:, 1] * q[:, 3],
+            2.0 * q[:, 1] * q[:, 2] + 2.0 * q[:, 0] * q[:, 3],
+            1.0 - 2.0 * q[:, 0] ** 2 - 2.0 * q[:, 1] ** 2,
+        ],
+        dim=1,
+    )
+    rr = torch.stack([r0, r1, r2], dim=1)
+    aa = torch.stack([p[:, 0], p[:, 1], p[:, 2]], dim=1).reshape(-1, 3, 1)
+    rr = torch.cat([rr, aa], dim=2)  # Pad right column.
+    aa = torch.stack(
+        [torch.tensor([0, 0, 0, 1], dtype=torch.float32).cuda()] * aa.shape[0], dim=0
+    )
+    rr = torch.cat([rr, aa.reshape(-1, 1, 4)], dim=1)  # Pad bottom row.
+
+    return rr
+
 
 
 def matrix_batch_44_from_position_r(r, p):
@@ -167,6 +213,7 @@ def render_texture_batch(
         resolution = [resolution, resolution]
     posw = torch.cat([pos, torch.ones([pos.shape[0], pos.shape[1], 1]).cuda()], axis=2)
 
+    #cam-view pose to NDC pose
     final_mtx_proj = torch.matmul(proj_cam, mtx)
     pos_clip_ja = dd.xfm_points(pos.contiguous(), final_mtx_proj)
 
@@ -561,8 +608,7 @@ def l1_reconstruct_depth_with_mask(ddope):
     """
     mask = ddope.renders['mask']
     gt_depth = ddope.gt_tensors["depth"].clone()
-    #reconstructed_depth_loss = torch.abs(torch.min(gt_depth,
-    #                        ddope.renders["depth"])-gt_depth)*mask[...,0]
+   
     full_depth = torch.where(mask[...,0]>0,torch.min(ddope.renders["depth"],gt_depth),gt_depth)
     reconstructed_depth_loss = torch.abs(full_depth-gt_depth)*mask[...,0]
 
@@ -960,7 +1006,9 @@ class Object3D(torch.nn.Module):
         opencv2opengl: bool = True,
         model_path: str = None,
         scale: int = 1,
-        refine_translation = True
+        refine_translation = True,
+        refine_rotation = True,
+        rotation_mode = 'rtheta'
     ):
         """
         Args:
@@ -972,7 +1020,9 @@ class Object3D(torch.nn.Module):
         """
         super().__init__()
         self.rx = None  # to load on cpu and not gpu
+        self.rotation_mode = rotation_mode
         self.refine_translation = refine_translation
+        self.refine_rotation = refine_rotation
         if model_path is None:
             self.mesh = None    
         else:
@@ -981,6 +1031,15 @@ class Object3D(torch.nn.Module):
         self.set_pose(
             position, rotation, batchsize, scale=scale, opencv2opengl=opencv2opengl
         )
+        
+    def position_params(self):
+        return chain([self.x, self.y, self.z])
+
+    def rotation_params(self):
+        rotation = [self.rx, self.ry, self.rz]
+        if self.rotation_mode!='rtheta':
+            rotation.append(self.rw)
+        return chain(rotation)
 
     def set_pose(
         self,
@@ -1006,18 +1065,23 @@ class Object3D(torch.nn.Module):
 
         assert len(rotation) == 4 or len(rotation) == 3 or len(rotation) == 9
         if len(rotation) == 4:
-            rotation = pyrr.Quaternion(rotation).matrix44
+            rotation = pyrr.Quaternion(rotation)
         if len(rotation) == 3 or len(rotation) == 9:
             rotation = pyrr.Matrix33(rotation)
 
         if opencv2opengl:
             position, rotation = opencv_2_opengl(position, rotation)
 
-        rSO3 = SO3(tensor=torch.from_numpy(np.array(rotation[:3,:3])).unsqueeze(0))
-        rotation = rSO3.log_map().squeeze()
+        if self.rotation_mode == 'rtheta':
+            rotation = rotation.matrix44
+            rSO3 = SO3(tensor=torch.from_numpy(np.array(rotation[:3,:3])).unsqueeze(0))
+            rotation = rSO3.log_map().squeeze()
+            log.info(f"rotation loaded as rtheta: {rotation}")
+        else:
+            log.info(f"rotation loaded as quaternion: {rotation}")
 
         log.info(f"translation loaded: {position}")
-        log.info(f"rotation loaded as rtheta: {rotation}")
+        
 
         self._position = position
         self._rotation = rotation
@@ -1031,6 +1095,9 @@ class Object3D(torch.nn.Module):
         self.ry = torch.nn.Parameter(torch.ones(batchsize) * rotation[1])
         self.rz = torch.nn.Parameter(torch.ones(batchsize) * rotation[2])
         self.rotation = [self.rx,self.ry,self.rz]
+        if self.rotation_mode!='rtheta':
+            self.rw = torch.nn.Parameter(torch.ones(batchsize) * rotation[2])
+            self.rotation.append(self.rw)
 
         self.x = torch.nn.Parameter(torch.ones(batchsize) * position[0]).requires_grad_(False)
         self.y = torch.nn.Parameter(torch.ones(batchsize) * position[1]).requires_grad_(False)
@@ -1039,6 +1106,11 @@ class Object3D(torch.nn.Module):
             self.x.requires_grad_(False)
             self.y.requires_grad_(False)
             self.z.requires_grad_(False)
+        
+        if self.refine_rotation==False:
+            self.rx.requires_grad_(False)
+            self.ry.requires_grad_(False)
+            self.rz.requires_grad_(False)
             
         self.position = [self.x,self.y,self.z]
         
@@ -1058,6 +1130,8 @@ class Object3D(torch.nn.Module):
         self.rx = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[0])
         self.ry = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[1])
         self.rz = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[2])
+        if self.rotation_mode!='rtheta':
+            self.rw = torch.nn.Parameter(torch.ones(batchsize) * self._rotation[2])
         
         self.x = torch.nn.Parameter(torch.ones(batchsize) * self._position[0])
         self.y = torch.nn.Parameter(torch.ones(batchsize) * self._position[1])
@@ -1067,6 +1141,11 @@ class Object3D(torch.nn.Module):
             self.x.requires_grad_(False)
             self.y.requires_grad_(False)
             self.z.requires_grad_(False)
+        
+        if self.refine_rotation==False:
+            self.rx.requires_grad_(False)
+            self.ry.requires_grad_(False)
+            self.rz.requires_grad_(False)
 
         self.to(device)
 
@@ -1095,6 +1174,8 @@ class Object3D(torch.nn.Module):
         self.rx = torch.nn.Parameter(torch.ones(self.rx.shape[0]) * self._rotation[0])
         self.ry = torch.nn.Parameter(torch.ones(self.rx.shape[0]) * self._rotation[1])
         self.rz = torch.nn.Parameter(torch.ones(self.rx.shape[0]) * self._rotation[2])
+        if self.rotation_mode!='rtheta':
+            self.rw = torch.nn.Parameter(torch.ones(self.rx.shape[0]) * self._rotation[2])
         
         self.x = torch.nn.Parameter(torch.ones(self.rx.shape[0]) * self._position[0])
         self.y = torch.nn.Parameter(torch.ones(self.rx.shape[0]) * self._position[1])
@@ -1107,13 +1188,18 @@ class Object3D(torch.nn.Module):
         Return:
             returns a dict with field quat, trans.
         """
-        #q = torch.stack([self.rx, self.qy, self.qz, self.qw], dim=0).T
-        #q = q / torch.norm(q, dim=1).reshape(-1, 1)
         # TODO add the dict from object3d to the output of the module.
-        r = torch.stack([self.rx,self.ry,self.rz],dim=0).T
+        rots = [self.rx,self.ry,self.rz]
         to_return = self.mesh()
-        to_return["rtheta"] = r
         to_return["trans"] = torch.stack([self.x, self.y, self.z], dim=0).T
+
+        if self.rotation_mode!='rtheta':
+            q = torch.stack([self.rx, self.ry, self.rz, self.rw], dim=0).T
+            q = q / torch.norm(q, dim=1).reshape(-1, 1)
+            to_return["quat"] = q
+        else:
+            r = torch.stack([self.rx, self.ry, self.rz], dim=0).T
+            to_return["rtheta"] = r
 
         return to_return
 
@@ -1412,10 +1498,18 @@ class DiffDope:
 
         # todo add a cfg call here.
         # self.object3d.mesh.enable_gradients_texture()
+        # self.optimizer = torch.optim.SGD(
+        #     self.object3d.parameters(), lr=self.cfg.hyperparameters.learning_rate_base
+        # )
+        self.optimizer = torch.optim.SGD([
+            {'params': self.object3d.position_params(), 'lr': self.cfg.hyperparameters.learning_rate_base_position},
+            {'params': self.object3d.rotation_params(), 'lr': self.cfg.hyperparameters.learning_rate_base_rotation}
+        ])
 
-        self.optimizer = torch.optim.SGD(
-            self.object3d.parameters(), lr=self.cfg.hyperparameters.learning_rate_base
-        )
+        # self.optimizer = torch.optim.SGD([
+        #     {'params': self.object3d.position_params(), 'lr': self.cfg.hyperparameters.learning_rate_base_position},
+        #     {'params': self.object3d.rotation_params(), 'lr': self.cfg.hyperparameters.learning_rate_base_rotation}
+        # ])
 
         # TODO add a seed to the random
         self.learning_rates = [
@@ -1723,9 +1817,15 @@ class DiffDope:
             result = self.object3d()
 
             # transform quat and position into a matrix44
-            mtx_gu = matrix_batch_44_from_position_r(
-                p=result["trans"], r=result["rtheta"]
-            )
+            if self.object3d.rotation_mode == 'rtheta':
+                mtx_gu = matrix_batch_44_from_position_r(
+                    p=result["trans"], r=result["rtheta"]
+                )
+            else:
+                mtx_gu = matrix_batch_44_from_position_quat(
+                    p=result["trans"], q=result["quat"]
+                )
+                
             if self.object3d.mesh.has_textured_map is False:
                 self.renders = render_texture_batch(
                     glctx=self.glctx,
@@ -1756,30 +1856,218 @@ class DiffDope:
             self.optimization_results.append(to_add)
 
             # computing the losses
-            loss = torch.zeros(1).cuda()
+            loss = torch.zeros(1,).cuda()
             for loss_function in self.loss_functions:
-                l = loss_function(self)
+                l = loss_function(self) #Bx1 
                 if l is None:
                     continue
                 loss += l
-            #print(loss)
+
             pbar.set_description(f"loss: {loss.item():.4f}")
             loss.backward()
+            
+            #scale rotation gradients
+            # self.object3d.rx.grad*=self.cfg.hyperparameters.rotation_grad_scale
+            # self.object3d.ry.grad*=self.cfg.hyperparameters.rotation_grad_scale
+            # self.object3d.rz.grad*=self.cfg.hyperparameters.rotation_grad_scale
+            #self.object3d.rw.grad*=self.cfg.hyperparameters.rotation_grad_scale
+            
             self.optimizer.step()
-            self.optimization_results[-1]["gradients"] = np.stack([self.object3d.rx.grad.detach().cpu().numpy(),
-                                               self.object3d.ry.grad.detach().cpu().numpy(),
-                                               self.object3d.rz.grad.detach().cpu().numpy(),
-                                               #self.object3d.x.grad.detach().cpu().numpy(),
-                                               #self.object3d.y.grad.detach().cpu().numpy(),
-                                               #self.object3d.z.grad.detach().cpu().numpy()
+            if self.object3d.x.grad == None:
+                x_grad = torch.zeros_like(self.object3d.rx.grad).cpu().numpy()
+                y_grad = torch.zeros_like(self.object3d.rx.grad).cpu().numpy()
+                z_grad = torch.zeros_like(self.object3d.rx.grad).cpu().numpy()
+            else:
+                x_grad = self.object3d.x.grad.detach().cpu().numpy()
+                y_grad = self.object3d.y.grad.detach().cpu().numpy()
+                z_grad = self.object3d.z.grad.detach().cpu().numpy()
+                
+            if self.object3d.rx.grad == None:
+                rx_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+                ry_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+                rz_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+                #rw_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+            else:
+                rx_grad = self.object3d.rx.grad.detach().cpu().numpy()
+                ry_grad = self.object3d.ry.grad.detach().cpu().numpy()
+                rz_grad = self.object3d.rz.grad.detach().cpu().numpy()
+                #rw_grad = self.object3d.rw.grad.detach().cpu().numpy()
+                
+            self.optimization_results[-1]["gradients"] = np.stack([
+                                               rx_grad,
+                                               ry_grad,
+                                               rz_grad,
+                                               #rw_grad,
+                                               x_grad,
+                                               y_grad,
+                                               z_grad
             ])
-            self.optimization_results[-1]["values"] = np.stack([self.object3d.rx.detach().cpu().numpy(),
+            self.optimization_results[-1]["values"] = np.stack([
+                                               self.object3d.rx.detach().cpu().numpy(),
                                                self.object3d.ry.detach().cpu().numpy(),
                                                self.object3d.rz.detach().cpu().numpy(),
+                                               #self.object3d.rw.detach().cpu().numpy(),
                                                self.object3d.x.detach().cpu().numpy(),
                                                self.object3d.y.detach().cpu().numpy(),
                                                self.object3d.z.detach().cpu().numpy()
                                                ])
+
+
+    def run_batched_rp_lr_optimization(self):
+        """
+        If the class is set correctly this runs the optimization for finding a good pose
+        """
+        
+        learning_rates_position = [
+            random.uniform(
+                self.cfg.hyperparameters.learning_rates_bound_position[0],
+                self.cfg.hyperparameters.learning_rates_bound_position[1],
+            )
+            for _ in range(self.batchsize)
+        ]
+        learning_rates_rotation = [
+            random.uniform(
+                self.cfg.hyperparameters.learning_rates_bound_rotation[0],
+                self.cfg.hyperparameters.learning_rates_bound_rotation[1],
+            )
+            for _ in range(self.batchsize)
+        ]
+        print(learning_rates_position)
+        print(learning_rates_rotation)
+        
+        learning_rates_position = torch.tensor(learning_rates_position).float().cuda()
+        learning_rates_rotation = torch.tensor(learning_rates_rotation).float().cuda()
+
+        self.losses_values = {}
+        self.optimization_results = []
+        
+        self.optimizer = torch.optim.SGD([
+            {'params': self.object3d.position_params(), 'lr': self.cfg.hyperparameters.learning_rate_base_position},
+            {'params': self.object3d.rotation_params(), 'lr': self.cfg.hyperparameters.learning_rate_base_rotation}
+        ])
+
+        
+        if self.scene.tensor_rgb is not None:
+            self.gt_tensors["rgb"] = self.scene.tensor_rgb.img_tensor
+        if self.scene.tensor_depth is not None:
+            self.gt_tensors["depth"] = self.scene.tensor_depth.img_tensor
+        if self.scene.tensor_segmentation is not None:
+            self.gt_tensors["segmentation"] = self.scene.tensor_segmentation.img_tensor
+
+
+        pbar = tqdm(range(self.cfg.hyperparameters.nb_iterations + 1))
+
+        for iteration_now in pbar:
+            itf = iteration_now / self.cfg.hyperparameters.nb_iterations + 1
+            lr = np.array(self.cfg.hyperparameters.base_lr_pr)* self.cfg.hyperparameters.lr_decay**itf
+            
+            for i,param_group in enumerate(self.optimizer.param_groups):
+                param_group["lr"] = lr[i]
+            
+            self.optimizer.zero_grad()
+
+            result = self.object3d()
+
+            # transform quat and position into a matrix44
+            if self.object3d.rotation_mode == 'rtheta':
+                mtx_gu = matrix_batch_44_from_position_r(
+                    p=result["trans"], r=result["rtheta"]
+                )
+            else:
+                mtx_gu = matrix_batch_44_from_position_quat(
+                    p=result["trans"], q=result["quat"]
+                )
+                
+            if self.object3d.mesh.has_textured_map is False:
+                self.renders = render_texture_batch(
+                    glctx=self.glctx,
+                    proj_cam=self.camera.cam_proj,
+                    mtx=mtx_gu,
+                    pos=result["pos"],
+                    pos_idx=result["pos_idx"],
+                    vtx_color=result["vtx_color"],
+                    resolution=self.resolution,
+                )
+            else:
+                # TODO test the index color version
+                self.renders = render_texture_batch(
+                    glctx=self.glctx,
+                    proj_cam=self.camera.cam_proj,
+                    mtx=mtx_gu,
+                    pos=result["pos"],
+                    pos_idx=result["pos_idx"],
+                    uv=result["uv"],
+                    uv_idx=result["uv_idx"],
+                    tex=result["tex"],
+                    resolution=self.resolution,
+                )
+            to_add = {}
+            to_add["rgb"] = self.renders["rgb"].detach().cpu()
+            to_add["depth"] = self.renders["depth"].detach().cpu()
+            to_add["mtx"] = mtx_gu.detach().cpu()
+            self.optimization_results.append(to_add)
+
+            # computing the losses
+            loss = torch.zeros(1,).cuda()
+            for loss_function in self.loss_functions:
+                l = loss_function(self)
+                if l is None:
+                    continue
+                loss += l.mean()
+
+            pbar.set_description(f"loss: {loss.mean().item():.4f}")
+            loss.backward()
+            
+            #scale batchwise gradients with learning rates
+            if self.object3d.x.grad!=None:
+                for params in self.object3d.position_params():
+                    params.grad*=learning_rates_position
+                            
+            if self.object3d.rx.grad!=None:
+                for params in self.object3d.rotation_params():
+                    params.grad*=learning_rates_rotation
+                                
+
+            self.optimizer.step()
+            if self.object3d.x.grad == None:
+                x_grad = torch.zeros_like(self.object3d.rx.grad).cpu().numpy()
+                y_grad = torch.zeros_like(self.object3d.rx.grad).cpu().numpy()
+                z_grad = torch.zeros_like(self.object3d.rx.grad).cpu().numpy()
+            else:
+                x_grad = self.object3d.x.grad.detach().cpu().numpy()
+                y_grad = self.object3d.y.grad.detach().cpu().numpy()
+                z_grad = self.object3d.z.grad.detach().cpu().numpy()
+                
+            if self.object3d.rx.grad == None:
+                rx_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+                ry_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+                rz_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+                #rw_grad = torch.zeros_like(self.object3d.x.grad).cpu().numpy()
+            else:
+                rx_grad = self.object3d.rx.grad.detach().cpu().numpy()
+                ry_grad = self.object3d.ry.grad.detach().cpu().numpy()
+                rz_grad = self.object3d.rz.grad.detach().cpu().numpy()
+                #rw_grad = self.object3d.rw.grad.detach().cpu().numpy()
+                
+            self.optimization_results[-1]["gradients"] = np.stack([
+                                               rx_grad,
+                                               ry_grad,
+                                               rz_grad,
+                                               #rw_grad,
+                                               x_grad,
+                                               y_grad,
+                                               z_grad
+            ])
+            self.optimization_results[-1]["values"] = np.stack([
+                                               self.object3d.rx.detach().cpu().numpy(),
+                                               self.object3d.ry.detach().cpu().numpy(),
+                                               self.object3d.rz.detach().cpu().numpy(),
+                                               #self.object3d.rw.detach().cpu().numpy(),
+                                               self.object3d.x.detach().cpu().numpy(),
+                                               self.object3d.y.detach().cpu().numpy(),
+                                               self.object3d.z.detach().cpu().numpy()
+                                               ])
+
 
     def cuda(self):
         """

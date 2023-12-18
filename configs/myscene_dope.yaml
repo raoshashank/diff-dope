@@ -25,7 +25,9 @@ object3d:
     rotation: 
     model_path: 
     opencv2opengl: False
-    refine_translation: True
+    refine_translation: 
+    refine_rotation: 
+    rotation_mode:
 losses:
     l1_rgb_with_mask: true
     weight_rgb: 0.7
@@ -40,9 +42,16 @@ hyperparameters:
     nb_iterations: 20
     batchsize: 16
     base_lr: 20
-    learning_rates_bound: [0.01, 100]
-    learning_rate_base: 1
+    base_lr_pr: 
+    learning_rates_bound: [0.01,100]
+    learning_rates_bound_position: [0.01, 100]
+    learning_rates_bound_rotation: [0.01, 100]
+    learning_rate_base_position: 
+    learning_rate_base_rotation:
+    momentum: 
+    learning_rate_base:
     lr_decay: 0.1
+    rotation_grad_scale:
 render_images:
     nrow: 4
     final_width_batch: 2000
