@@ -566,7 +566,7 @@ def dist_batch_lr(tensor, learning_rates, channels=[1, 2, 3]):
     return torch.mean(tensor, channels) * learning_rates
 
 
-def l1_rgb_with_mask(ddope):
+def l1_rgb_with_mask(ddope,dist_lr = True):
     """
     Computes the l1_rgb on a DiffDOPE object, simpler to pass the object.
     """
@@ -574,16 +574,18 @@ def l1_rgb_with_mask(ddope):
         (ddope.renders["rgb"] - ddope.gt_tensors["rgb"])
         * ddope.gt_tensors["segmentation"]
     )
-    lr_diff_rgb = dist_batch_lr(diff_rgb, ddope.learning_rates)
-
+    
     ddope.add_loss_value(
         "rgb", torch.mean(diff_rgb.detach(), (1, 2, 3)) * ddope.cfg.losses.weight_rgb
     )
+    if dist_lr == True:
+        lr_diff_rgb = dist_batch_lr(diff_rgb, ddope.learning_rates)
+        return lr_diff_rgb.mean() * ddope.cfg.losses.weight_rgb
+    else:
+        return torch.mean(diff_rgb,(1,2,3))* ddope.cfg.losses.weight_rgb
 
-    return lr_diff_rgb.mean() * ddope.cfg.losses.weight_rgb
 
-
-def l1_depth_with_mask(ddope):
+def l1_depth_with_mask(ddope,dist_lr=True):
     """
     Computes the l1_depth on a DiffDOPE object, simpler to pass the object.
     """
@@ -594,15 +596,17 @@ def l1_depth_with_mask(ddope):
         * ddope.gt_tensors["segmentation"][..., 0]
         #*mask[...,0]
     )
-    lr_diff_depth = dist_batch_lr(diff_depth, ddope.learning_rates, [1, 2])
 
     ddope.add_loss_value(
         "depth", torch.mean(diff_depth.detach(), (1, 2)) * ddope.cfg.losses.weight_depth
     )
+    if dist_lr == True:
+        lr_diff_depth = dist_batch_lr(diff_depth, ddope.learning_rates, [1, 2])
+        return lr_diff_depth.mean() * ddope.cfg.losses.weight_depth
+    else:
+        return torch.mean(diff_depth,(1,2))* ddope.cfg.losses.weight_depth
 
-    return lr_diff_depth.mean() * ddope.cfg.losses.weight_depth
-
-def l1_reconstruct_depth_with_mask(ddope):
+def l1_reconstruct_depth_with_mask(ddope,dist_lr=True):
     """
     Computes the Error in adding the rendered object to the depth image
     """
@@ -617,11 +621,14 @@ def l1_reconstruct_depth_with_mask(ddope):
     ddope.add_loss_value(
         "reconstructed_depth", torch.mean(reconstructed_depth_loss.detach(), (1, 2))# * ddope.cfg.losses.weight_reconstruct
     )
+    if dist_lr == True:
+        lr_diff_depth = dist_batch_lr(reconstructed_depth_loss, ddope.learning_rates, [1, 2])
+        return lr_diff_depth.mean() * ddope.cfg.losses.weight_reconstruct        
+    else:
+        return torch.mean(reconstructed_depth_loss,(1,2))* ddope.cfg.losses.weight_reconstruct
 
-    return lr_diff_depth.mean() * ddope.cfg.losses.weight_reconstruct
 
-
-def l1_mask(ddope):
+def l1_mask(ddope,dist_lr = True):
     """
     Computes the L1-on mask on a DiffDOPE object.
 
@@ -641,19 +648,19 @@ def l1_mask(ddope):
     diff_mask = torch.abs(mask - ddope.gt_tensors["segmentation"])
 
     # Compute the L1-on mask loss with batch-wise learning rates
-    lr_diff_mask = dist_batch_lr(diff_mask, ddope.learning_rates)
-
+    
     # Add the L1-on mask loss to the DiffDOPE object
     ddope.add_loss_value(
         "mask_selection",
         torch.mean(torch.abs(diff_mask.detach()), (1, 2, 3))
         * ddope.cfg.losses.weight_mask,
     )
-
-    # Calculate the mean of the L1-on mask loss and apply the weight from the configuration
-    lr_diff_mask_mean = lr_diff_mask.mean() * ddope.cfg.losses.weight_mask
-
-    return lr_diff_mask_mean
+    if dist_lr == True:
+        lr_diff_mask = dist_batch_lr(diff_mask, ddope.learning_rates)
+        #Calculate the mean of the L1-on mask loss and apply the weight from the configuration
+        return lr_diff_mask.mean() * ddope.cfg.losses.weight_mask
+    else:
+        return torch.mean(diff_mask,(1,2,3))* ddope.cfg.losses.weight_mask
 
 
 ##############################################################################
@@ -1519,7 +1526,6 @@ class DiffDope:
             )
             for _ in range(batchsize)
         ]
-        print(self.learning_rates)
         self.learning_rates = torch.tensor(self.learning_rates).float().cuda()
         
 
@@ -1858,7 +1864,7 @@ class DiffDope:
             # computing the losses
             loss = torch.zeros(1,).cuda()
             for loss_function in self.loss_functions:
-                l = loss_function(self) #Bx1 
+                l = loss_function(self,dist_lr=True) #Bx1 
                 if l is None:
                     continue
                 loss += l
@@ -2010,7 +2016,7 @@ class DiffDope:
             # computing the losses
             loss = torch.zeros(1,).cuda()
             for loss_function in self.loss_functions:
-                l = loss_function(self)
+                l = loss_function(self,dist_lr=False)
                 if l is None:
                     continue
                 loss += l.mean()

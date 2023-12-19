@@ -1,0 +1,69 @@
+---
+camera:
+    fx: 
+    fy: 
+    cx: 
+    cy: 
+    im_width: 
+    im_height: 
+    typ: pybullet
+    znear:
+    zfar:
+    fov:
+scene:
+    path_img: 
+    path_depth: 
+    path_segmentation: 
+    image_resize: 1.0
+    dataset_path:
+    parent_id:
+    object_id:
+object3d:
+    position: 
+    scale: 1.0
+    # rotation can be a quaternion, matrix 3x3 flatten or not
+    rotation: 
+    model_path: 
+    opencv2opengl: False
+
+    refine_translation: True
+    refine_rotation: True
+    
+    rotation_mode: 'rtheta'
+losses:
+    l1_rgb_with_mask: true
+    weight_rgb: 0.0
+    l1_depth_with_mask: true
+    weight_depth: 0.0
+    l1_mask: true
+    weight_mask: 0.0
+    l1_reconstruct_depth_with_mask: true
+    weight_reconstruct: 100.0
+    stage_ratio: 0.5
+hyperparameters: # These need to be tuned
+    nb_iterations: 200
+    batchsize: 16
+
+    #for run_optimization() ONLY
+    base_lr: 0.1
+    learning_rate_base: 0.1
+    learning_rates_bound: [0.01,0.5]
+    
+    #for run_batched_rp_lr_optimization() ONLY
+    base_lr_pr: [0.5,7] 
+    learning_rates_bound_position: [0.01, 1]
+    learning_rates_bound_rotation: [1, 50]
+    learning_rate_base_position: 0.5
+    learning_rate_base_rotation: 7
+
+    lr_decay: 0.6
+    rotation_grad_scale: 1.0
+render_images:
+    nrow: 4
+    final_width_batch: 2000
+    add_background: true
+    alpha_overlay: 0.7
+    add_countour: true
+    color_countour: [0.46, 0.73, 0]
+    flip_result: true
+    crop_around_mask: False
